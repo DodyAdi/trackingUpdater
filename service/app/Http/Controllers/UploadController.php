@@ -12,6 +12,9 @@ use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\Client;
 use GuzzleHttp\Psr7;
+set_time_limit(4000);
+curl_setopt(curl_init(), CURLOPT_CONNECTTIMEOUT, 0);
+curl_setopt(curl_init(), CURLOPT_TIMEOUT, 0);
 class UploadController extends Controller {
   public $GlobalData = array();
   public $globalvar = array();
@@ -46,7 +49,6 @@ class UploadController extends Controller {
 
         $user = '10cd4275238f571cdf4308bdb8c9caa6';
         $pass = "e1fa0949ba9687a8c9a630500adeb89f";
-
         for ($i=0; $i < count($exelData); $i++) {
           $id = $exelData[$i]['order_id'];
           $this->globalvar[$i]['order_id'] = $id;
@@ -62,7 +64,7 @@ class UploadController extends Controller {
             $orderData = json_decode($getOrder->getbody(),true);
             // End Get Shopify Order Detail
 
-            if (!empty($orderData['orders']) && empty($orderData['orders'][0]['fulfillment_status']) && $getOrder->getStatusCode() == 200) {
+            if (!empty($orderData['orders']) && empty($orderData['orders'][0]['fulfillment_status']) || $orderData['orders'][0]['fulfillment_status'] == 'partial' && $getOrder->getStatusCode() == 200) {
               // fulfillment Shopify
               $fulfill = array(
                 "fulfillment" => [
@@ -81,7 +83,9 @@ class UploadController extends Controller {
                 }
 
                 for ($j=0; $j < count($orderData['orders'][0]['line_items']); $j++) {
-                  $fulfill['fulfillment']['line_items'][] = array('id' => $orderData['orders'][0]['line_items'][$j]['id']);
+                  if (empty($orderData['orders'][0]['line_items'][$j]['fulfillment_status'])) {
+                    $fulfill['fulfillment']['line_items'][] = array('id' => $orderData['orders'][0]['line_items'][$j]['id']);
+                  }
                 }
 
                 $Fulfillstatus = '';
@@ -101,49 +105,70 @@ class UploadController extends Controller {
                 }
                 // End fulfillment Shopify
               }
-              elseif (!empty($orderData['orders']) && $orderData['orders'][0]['fulfillment_status'] == 'fulfilled' && $getOrder->getStatusCode() == 200) {
-                  $this->globalvar[$i]['fulfillment_status'] = 422;
+              elseif (!empty($orderData['orders']) && $orderData['orders'][0]['fulfillment_status'] == 'fulfilled'  && $getOrder->getStatusCode() == 200) {
+                $this->globalvar[$i]['fulfillment_status'] = 422;
+              }
+              elseif (empty($orderData['orders'])) {
+                $this->globalvar[$i]['fulfillment_status'] = 404;
               }
 
 
-              // Get Paypal TransactionId from Shopify
-              $getTransaction = $client->request("GET",
-              "https://{$user}:{$pass}@gadgetsmarket.myshopify.com/admin/orders/{$orderData['orders'][0]['id']}/transactions.json",
-              ['query' => [
-                  'fields'=> "authorization,status"
-                ]
-              ]);
-              $transactionData = json_decode($getTransaction->getbody(),true);
-              $this->globalvar[$i]['transaction_id'] = $transactionData['transactions'][0]['authorization'];
-              // Get Paypal TransactionId from Shopify
+              if (!empty($orderData['orders'])) {
+                // Get Paypal TransactionId from Shopify
+                $getTransaction = $client->request("GET",
+                "https://{$user}:{$pass}@gadgetsmarket.myshopify.com/admin/orders/{$orderData['orders'][0]['id']}/transactions.json",
+                  ['query' => [
+                    'fields'=> "authorization,status"
+                  ]
+                ]);
+                $transactionData = json_decode($getTransaction->getbody(),true);
 
+                $transactionStatus = 'failure';
+                $transactionId = '';
+                for ($v=0; $v < count($transactionData['transactions']); $v++) {
+                  if ($transactionData['transactions'][$v]['status'] != 'failure') {
+                    $transactionStatus = $transactionData['transactions'][$v]['status'];
+                    $transactionId = $transactionData['transactions'][$v]['authorization'];
+                  }
+                }
+                // End Get Paypal TransactionId from Shopify
 
-              $tracker = array(
-                "trackers" => [[
-                  "transaction_id" => $this->globalvar[$i]['transaction_id'],
-                  "tracking_number" => preg_replace('/[^0-9]/', '', $exelData[$i]['tracking_number']),
-                  "status" => "SHIPPED",
-                  "shipment_date" => !empty($exelData[$i]['shipment_date']) ? date("Y-m-d", strtotime($exelData[$i]['shipment_date'])) : date('Y-m-d'),
-                  "carrier" => "OTHER",
-                  "carrier_name_other" => strtoupper($exelData[$i]['tracking_company'])
-                  ]]
-                );
+                if ($transactionStatus != "failure") {
+                  $this->globalvar[$i]['transaction_id'] = $transactionId;
+                  $tracker = array(
+                    "trackers" => [[
+                      "transaction_id" => $this->globalvar[$i]['transaction_id'],
+                      "tracking_number" => preg_replace('/[^0-9]/', '', $exelData[$i]['tracking_number']),
+                      "status" => "SHIPPED",
+                      "shipment_date" => !empty($exelData[$i]['shipment_date']) ? date("Y-m-d", strtotime($exelData[$i]['shipment_date'])) : date('Y-m-d'),
+                      "carrier" => "OTHER",
+                      "carrier_name_other" => strtoupper($exelData[$i]['tracking_company'])
+                      ]]
+                    );
 
-              try {
-                $paypalAddTracking = $client->request(
-                  "POST",
-                  "https://api.paypal.com/v1/shipping/trackers",
-                  [
-                    "headers"=> [
-                      "Content-Type" => "application/json",
-                      "Authorization" => "Bearer {$tokenCode}"
-                    ],
-                    "body" => json_encode($tracker)
-                  ]);
-                $this->globalvar[$i]['paypalAddTracking_status'] = $paypalAddTracking->getStatusCode();
-              } catch (ClientException $e) {
-                $this->globalvar[$i]['paypalAddTracking_status'] = $e->getResponse()->getStatusCode();
+                    try {
+                      $paypalAddTracking = $client->request(
+                        "POST",
+                        "https://api.paypal.com/v1/shipping/trackers",
+                        [
+                          "headers"=> [
+                            "Content-Type" => "application/json",
+                            "Authorization" => "Bearer {$tokenCode}"
+                          ],
+                          "body" => json_encode($tracker)
+                        ]);
+                        $this->globalvar[$i]['paypalAddTracking_status'] = $paypalAddTracking->getStatusCode();
+                    } catch (ClientException $e) {
+                        $this->globalvar[$i]['paypalAddTracking_status'] = $e->getResponse()->getStatusCode();
+                    }
+                }
+                elseif ($transactionData['transactions'][0]['status'] == "failure") {
+                  $this->globalvar[$i]['transaction_id'] = 'Paypal Transactions Failed';
+                  $this->globalvar[$i]['paypalAddTracking_status'] = 500;
+                }
               }
+
+
 
             }
           }
